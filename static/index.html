@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LiveGuard AI | Campus Access</title>
+<link rel="stylesheet" href="/static/kiosk.css">
+<script defer src="/static/kiosk.js"></script>
+</head>
+<body>
+<header class="top"><div class="brand"><span aria-hidden="true" class="mark">LG</span> LiveGuard AI</div>
+<span class="station">HID Hackathon · Campus Lab</span></header>
+<main>
+  <div class="intro"><h1>Campus access</h1><p>Verify your identity at the Campus Lab kiosk.</p></div>
+  <div class="layout">
+    <section class="capture" aria-label="Camera preview">
+      <video id="camera" autoplay muted playsinline aria-label="Live camera"></video>
+      <div class="guide" aria-hidden="true"></div>
+      <div class="camera-caption" id="camera-caption">Camera off</div>
+    </section>
+    <section class="panel" aria-label="Access verification">
+      <div id="result" class="result" data-outcome="idle" role="status" aria-live="polite">
+        <div id="participant-display" class="participant-tag" hidden></div>
+        <h2 id="outcome">Ready to verify</h2>
+        <p id="message">Start the camera and center your face in the guide.</p>
+      </div>
+      <dl class="stats"><div><dt>Decision time</dt><dd id="duration">—</dd></div><div><dt>Liveness score</dt><dd id="score">—</dd></div></dl>
+
+      <div class="camera-section">
+        <label for="camera-select">Camera source (Laptop or Mobile Phone)</label>
+        <div class="camera-select-row">
+          <select id="camera-select" aria-label="Select camera device">
+            <option value="">Detecting cameras…</option>
+          </select>
+          <button id="refresh-cameras" type="button" title="Refresh available cameras" aria-label="Refresh camera devices">↻ Refresh</button>
+        </div>
+        <div class="actions">
+          <button id="start" type="button">Start camera</button>
+          <button id="stop" type="button" disabled>Stop camera</button>
+        </div>
+      </div>
+
+      <form id="scan-form">
+        <label for="subject">Participant Campus ID</label>
+        <input id="subject" required maxlength="32" pattern="[a-zA-Z0-9_\-]+" autocomplete="off" spellcheck="false" placeholder="e.g. demo-user">
+        <button id="scan" type="submit" class="wide" disabled>Verify access</button>
+        <button id="retry" class="wide" type="button" hidden>Retake verification</button>
+      </form>
+
+      <details>
+        <summary>Operator enrollment</summary>
+        <label for="operator-id">Operator ID</label>
+        <input id="operator-id" maxlength="32" autocomplete="off" spellcheck="false" placeholder="e.g. op-admin">
+        <label for="token">Operator credential / token</label>
+        <input type="password" id="token" autocomplete="off" placeholder="16+ char secret">
+        <label for="display-name">Participant display name (optional, supports Kannada &amp; spaces)</label>
+        <input id="display-name" maxlength="64" autocomplete="off" placeholder="e.g. Ramesh Kumar / ರಮೇಶ್ ಕುಮಾರ್">
+        <label class="consent"><input type="checkbox" id="consent"> The participant consents to local face enrollment.</label>
+        <div class="actions">
+          <button id="enroll" type="button" disabled>Enroll participant</button>
+          <button id="delete" type="button">Delete enrollment</button>
+        </div>
+      </details>
+
+      <details>
+        <summary>Evaluation</summary>
+        <label for="scenario">Test scenario</label>
+        <select id="scenario">
+          <option value="">Select a scenario (or leave blank for standard log)</option>
+          <option value="genuine">Genuine, authorized</option>
+          <option value="wrong_identity">Wrong identity</option>
+          <option value="schedule_denied">Schedule denied</option>
+          <option value="print">Printed photo</option>
+          <option value="screen_photo">Screen photo</option>
+          <option value="video_replay">Video replay</option>
+          <option value="mask">Mask</option>
+          <option value="poor_light">Poor lighting</option>
+          <option value="offline">Offline</option>
+        </select>
+        <button class="wide" id="export" type="button">Export session CSV</button>
+        <div class="export-meta"><span id="export-count">0 recorded attempts</span></div>
+      </details>
+
+      <details id="diagnostics-drawer">
+        <summary>Operator diagnostics</summary>
+        <div id="diagnostics-content"><p class="muted">No scan diagnostics recorded yet.</p></div>
+      </details>
+    </section>
+  </div>
+  <footer>Hackathon prototype · Access decisions are simulated</footer>
+</main>
+</body>
+</html>

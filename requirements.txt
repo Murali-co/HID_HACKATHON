@@ -1,0 +1,9 @@
+fastapi==0.141.1
+uvicorn==0.52.1
+cryptography==50.0.0
+numpy==2.2.6
+opencv-python-headless==4.12.0.88
+onnxruntime==1.24.4
+Pillow==13.0.0
+httpx==0.28.1
+boto3==1.44.3

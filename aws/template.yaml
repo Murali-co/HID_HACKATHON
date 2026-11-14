@@ -1,0 +1,52 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: LiveGuard hackathon kiosk audit ingestion
+Resources:
+  AuditTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: event_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: event_id
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: expires
+        Enabled: true
+  AuditApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Auth:
+        EnableIamAuthorizer: true
+        DefaultAuthorizer: AWS_IAM
+  AuditFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: handler.ingest
+      Runtime: python3.12
+      Timeout: 5
+      Environment:
+        Variables:
+          TABLE: !Ref AuditTable
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: dynamodb:PutItem
+              Resource: !GetAtt AuditTable.Arn
+      Events:
+        Audit:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AuditApi
+            Method: POST
+            Path: /audit
+Outputs:
+  AuditUrl:
+    Value: !Sub 'https://${AuditApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/audit'
+  AuditTableName:
+    Value: !Ref AuditTable
