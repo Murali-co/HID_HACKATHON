@@ -18,6 +18,49 @@ class CaptureError(Exception):
     pass
 
 
+DEFAULT_GUIDE = {
+    "left": 0.27,
+    "top": 0.16,
+    "width": 0.46,
+    "height": 0.65,
+}
+OVERLAP_THRESHOLD = 0.50
+
+
+def face_guide_overlap(face_box, guide_box):
+    """
+    Computes overlap metrics between a face bounding box and the guide region.
+    face_box: (x, y, w, h) in pixel coordinates.
+    guide_box: (gx1, gy1, gx2, gy2) in pixel coordinates.
+
+    Returns:
+        overlap_ratio: float in [0.0, 1.0], fraction of face_box area inside guide_box.
+        center_inside: bool, True if the geometric center (cx, cy) is inside guide_box.
+    """
+    fx, fy, fw, fh = face_box[:4]
+    if fw <= 0 or fh <= 0:
+        return 0.0, False
+
+    gx1, gy1, gx2, gy2 = guide_box
+    cx = fx + fw / 2.0
+    cy = fy + fh / 2.0
+
+    center_inside = (gx1 <= cx <= gx2) and (gy1 <= cy <= gy2)
+
+    ix1 = max(fx, gx1)
+    iy1 = max(fy, gy1)
+    ix2 = min(fx + fw, gx2)
+    iy2 = min(fy + fh, gy2)
+
+    iw = max(0.0, ix2 - ix1)
+    ih = max(0.0, iy2 - iy1)
+    inter_area = iw * ih
+    face_area = fw * fh
+
+    overlap_ratio = inter_area / face_area if face_area > 0 else 0.0
+    return overlap_ratio, center_inside
+
+
 @dataclass
 class Evidence:
     pad: str
@@ -78,7 +121,7 @@ def validate_template(template):
 
 
 class Vision:
-    def __init__(self, live_min=.85, spoof_max=.25, check_enroll_pad=True):
+    def __init__(self, live_min=.85, spoof_max=.25, check_enroll_pad=True, guide=None, overlap_threshold=OVERLAP_THRESHOLD):
         if not 0 < spoof_max < live_min < 1:
             raise ValueError("Require 0 < spoof_max < live_min < 1")
         if not check_models():
@@ -99,28 +142,75 @@ class Vision:
         self.lock = threading.Lock()
         self.live_min, self.spoof_max = live_min, spoof_max
         self.check_enroll_pad = check_enroll_pad and os.environ.get("LIVEGUARD_DISABLE_ENROLL_PAD") != "1"
+        self.guide = dict(guide) if guide is not None else DEFAULT_GUIDE.copy()
+        self.overlap_threshold = float(overlap_threshold)
         self.detector.detect(np.zeros((240, 320, 3), dtype=np.uint8))
         self.recognizer.feature(np.zeros((112, 112, 3), dtype=np.uint8))
         for session, input_name, _ in self.pad_models:
             self.pad_score(session, input_name, np.zeros((80, 80, 3), dtype=np.uint8))
 
-    def faces(self, image):
+    def faces(self, image, previous_face=None):
         height, width = image.shape[:2]
         small = cv2.resize(image, (320, 240))
-        _, faces = self.detector.detect(small)
-        if faces is None or len(faces) != 1:
+        _, raw_faces = self.detector.detect(small)
+
+        if raw_faces is None or len(raw_faces) == 0:
+            raise CaptureError("center_face_in_guide")
+
+        # Map detected face coordinates back to original image dimensions
+        scaled_faces = []
+        for rf in raw_faces:
+            f = rf.copy()
+            f[:14:2] *= width / 320.0
+            f[1:14:2] *= height / 240.0
+            scaled_faces.append(f)
+
+        # Active face region corresponding to the visible guide
+        gx1 = self.guide["left"] * width
+        gy1 = self.guide["top"] * height
+        gx2 = (self.guide["left"] + self.guide["width"]) * width
+        gy2 = (self.guide["top"] + self.guide["height"]) * height
+        guide_box = (gx1, gy1, gx2, gy2)
+
+        # Overlap rule:
+        # 1. Geometric center (cx, cy) must lie within the guide rectangle.
+        # 2. At least OVERLAP_THRESHOLD (50%) of face area must overlap the guide.
+        # Background people, passersby, or tiny boundary intersections are ignored.
+        eligible_faces = []
+        for face_candidate in scaled_faces:
+            overlap_ratio, center_inside = face_guide_overlap(face_candidate[:4], guide_box)
+            if center_inside and overlap_ratio >= self.overlap_threshold:
+                eligible_faces.append(face_candidate)
+
+        if len(eligible_faces) == 0:
+            # Faces detected in frame, but none centered substantially inside the guide
+            raise CaptureError("center_face_in_guide")
+
+        if len(eligible_faces) > 1:
+            # Multiple people positioned inside the guide
             raise CaptureError("one_face_required")
-        face = faces[0].copy()
-        face[:14:2] *= width / 320
-        face[1:14:2] *= height / 240
+
+        face = eligible_faces[0]
+
+        # Burst consistency check: ensure face does not switch or jump between people
+        if previous_face is not None:
+            prev_cx = previous_face[0] + previous_face[2] / 2.0
+            prev_cy = previous_face[1] + previous_face[3] / 2.0
+            curr_cx = face[0] + face[2] / 2.0
+            curr_cy = face[1] + face[3] / 2.0
+            if math.hypot(curr_cx - prev_cx, curr_cy - prev_cy) > 0.35 * width:
+                raise CaptureError("center_face_in_guide")
+
         x, y, w, h = face[:4]
         if min(w, h) < 85 or x < 3 or y < 3 or x + w >= width - 3 or y + h >= height - 3:
             raise CaptureError("center_face_in_guide")
+
         gray = cv2.cvtColor(image[int(y):int(y+h), int(x):int(x+w)], cv2.COLOR_BGR2GRAY)
         light = float(gray.mean())
         focus = float(cv2.Laplacian(cv2.resize(gray, (112, 112)), cv2.CV_32F).var())
         if not 45 <= light <= 225 or focus < 25:
             raise CaptureError("improve_light_or_focus")
+
         return face, {"light": light, "focus": focus, "box": [float(x), float(y), float(w), float(h)]}
 
     @staticmethod
@@ -142,7 +232,12 @@ class Vision:
             raise CaptureError("camera_pipeline_busy")
         try:
             samples = [decode(frame) for frame in frames]
-            face_results = [self.faces(image) for image in samples]
+            face_results = []
+            prev_face = None
+            for image in samples:
+                face, qual = self.faces(image, previous_face=prev_face)
+                face_results.append((face, qual))
+                prev_face = face
             faces = [res[0] for res in face_results]
 
             # Live Presentation Attack Detection on enrollment frames
@@ -170,10 +265,12 @@ class Vision:
             samples = []
             scores = []
             frame_diagnostics = []
+            prev_face = None
             for i, frame in enumerate(frames):
                 image = decode(frame)
-                face, quality = self.faces(image)
+                face, quality = self.faces(image, previous_face=prev_face)
                 samples.append((image, face))
+                prev_face = face
                 pad_pair = [self.pad_score(session, input_name, crop_with_context(image, face, margin))
                             for session, input_name, margin in self.pad_models]
                 scores.append(pad_pair)
@@ -211,13 +308,19 @@ class Vision:
 
             # Match each frame so mixed identities cannot be averaged into an allow
             frame_matches = []
+            frame_embeddings = []
             for idx, (image, face) in enumerate(samples):
                 emb = self.embedding(image, face)
+                frame_embeddings.append(emb)
                 val = float(emb @ enrolled)
                 if not math.isfinite(val):
                     return Evidence("UNCERTAIN", score, reason="identity_uncertain", diagnostics=diag_summary)
                 frame_matches.append(val)
                 frame_diagnostics[idx]["identity_score"] = round(val, 4)
+
+            # Ensure identity did not switch across frames in the burst
+            if min(float(frame_embeddings[0] @ emb) for emb in frame_embeddings[1:]) < .50:
+                return Evidence("UNCERTAIN", score, reason="identity_uncertain", diagnostics=diag_summary)
 
             match = min(frame_matches)
             diag_summary["identity_min"] = round(match, 4)

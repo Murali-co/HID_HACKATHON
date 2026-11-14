@@ -21,7 +21,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from policy import evaluate
 from storage import CorruptTemplateError, Store
-from vision import CaptureError, Evidence, Vision
+from vision import CaptureError, Evidence, Vision, DEFAULT_GUIDE
 
 WEB = Path(__file__).resolve().parent / "static"
 Subject = Annotated[str, StringConstraints(pattern=r"^[a-zA-Z0-9_-]{1,32}$")]
@@ -206,7 +206,8 @@ def create_app(vision_factory=Vision, store_factory=Store, check_policy=evaluate
 
     @app.get("/api/status")
     def status():
-        return {"models_ready": app.state.vision is not None, "door": "campus-lab"}
+        guide = app.state.vision.guide if app.state.vision else DEFAULT_GUIDE
+        return {"models_ready": app.state.vision is not None, "door": "campus-lab", "guide": guide}
 
     @app.post("/api/enroll", status_code=201)
     def enroll(body: Enroll,

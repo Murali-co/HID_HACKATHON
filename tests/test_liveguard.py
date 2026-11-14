@@ -22,7 +22,15 @@ from app import Clock, create_app, decide
 from evaluate import summarize
 from policy import evaluate
 from storage import CorruptTemplateError, Store
-from vision import CaptureError, Evidence, Vision, validate_template
+from vision import (
+    CaptureError,
+    Evidence,
+    Vision,
+    validate_template,
+    face_guide_overlap,
+    DEFAULT_GUIDE,
+    OVERLAP_THRESHOLD,
+)
 
 SPEC = importlib.util.spec_from_file_location("audit_handler", Path(__file__).parents[1] / "aws/handler.py")
 handler = importlib.util.module_from_spec(SPEC)
@@ -433,6 +441,176 @@ class FullWorkflowIntegrationTests(unittest.TestCase):
                     self.assertEqual(res_delete.status_code, 200)
                     self.assertTrue(res_delete.json()["deleted"])
                     self.assertIsNone(store.get("demo-user"))
+
+
+class FaceGuideFilteringTests(unittest.TestCase):
+    def setUp(self):
+        self.vision = Vision(check_enroll_pad=False)
+        np.random.seed(42)
+        # Create image with textured luminance for realistic focus and light checks
+        self.img_4x3 = np.random.randint(80, 160, (480, 640, 3), dtype=np.uint8)
+
+    def _make_raw_face(self, x, y, w, h, score=0.95):
+        """Construct raw 15-element detector vector in 320x240 detector space."""
+        row = np.zeros(15, dtype=np.float32)
+        row[0:4] = [x, y, w, h]
+        row[4], row[5] = x + w * 0.3, y + h * 0.3
+        row[6], row[7] = x + w * 0.7, y + h * 0.3
+        row[8], row[9] = x + w * 0.5, y + h * 0.5
+        row[10], row[11] = x + w * 0.35, y + h * 0.75
+        row[12], row[13] = x + w * 0.65, y + h * 0.75
+        row[14] = score
+        return row
+
+    def test_one_person_inside_guide(self):
+        # Center face in 320x240: x=120, y=70, w=80, h=90 -> in 640x480: x=240, y=140, w=160, h=180
+        inside_face = self._make_raw_face(120, 70, 80, 90)
+        mock_det = Mock()
+        mock_det.detect.return_value = (None, np.array([inside_face]))
+
+        with patch.object(self.vision, "detector", mock_det):
+            face, quality = self.vision.faces(self.img_4x3)
+            self.assertEqual(quality["box"], [240.0, 140.0, 160.0, 180.0])
+            self.assertGreaterEqual(quality["focus"], 25.0)
+            self.assertTrue(45.0 <= quality["light"] <= 225.0)
+
+    def test_one_person_inside_with_additional_people_outside(self):
+        # Inside face + 2 background people on periphery
+        inside_face = self._make_raw_face(120, 70, 80, 90)
+        outside_left = self._make_raw_face(10, 20, 50, 60)
+        outside_right = self._make_raw_face(260, 20, 50, 60)
+        mock_det = Mock()
+        mock_det.detect.return_value = (None, np.array([outside_left, inside_face, outside_right]))
+
+        with patch.object(self.vision, "detector", mock_det):
+            face, quality = self.vision.faces(self.img_4x3)
+            # Must select the inside person and ignore background people
+            self.assertEqual(quality["box"], [240.0, 140.0, 160.0, 180.0])
+
+    def test_larger_background_face_outside_guide_is_never_selected(self):
+        # Inside face (w=80, h=90) vs larger background face outside (w=120, h=140)
+        inside_face = self._make_raw_face(120, 70, 80, 90)
+        large_outside = self._make_raw_face(5, 5, 120, 140)
+        mock_det = Mock()
+        mock_det.detect.return_value = (None, np.array([large_outside, inside_face]))
+
+        with patch.object(self.vision, "detector", mock_det):
+            face, quality = self.vision.faces(self.img_4x3)
+            self.assertEqual(quality["box"], [240.0, 140.0, 160.0, 180.0],
+                             "Never select an outside face simply because it is larger")
+
+    def test_faces_outside_but_nobody_inside_asks_to_move_into_guide(self):
+        outside_1 = self._make_raw_face(10, 20, 50, 60)
+        outside_2 = self._make_raw_face(260, 20, 50, 60)
+        mock_det = Mock()
+        mock_det.detect.return_value = (None, np.array([outside_1, outside_2]))
+
+        with patch.object(self.vision, "detector", mock_det):
+            with self.assertRaises(CaptureError) as ctx:
+                self.vision.faces(self.img_4x3)
+            self.assertEqual(str(ctx.exception), "center_face_in_guide")
+
+    def test_two_eligible_faces_inside_requires_only_one(self):
+        # Two people both standing inside the guide area
+        inside_1 = self._make_raw_face(100, 65, 55, 75)
+        inside_2 = self._make_raw_face(170, 65, 55, 75)
+        mock_det = Mock()
+        mock_det.detect.return_value = (None, np.array([inside_1, inside_2]))
+
+        with patch.object(self.vision, "detector", mock_det):
+            with self.assertRaises(CaptureError) as ctx:
+                self.vision.faces(self.img_4x3)
+            self.assertEqual(str(ctx.exception), "one_face_required")
+
+    def test_face_crossing_guide_boundary(self):
+        guide_box = (172.8, 76.8, 467.2, 388.8)
+
+        # 1. Crossing boundary with tiny intersection (< 50% overlap, center outside)
+        face_mostly_out = (110, 140, 100, 120)
+        overlap, center_in = face_guide_overlap(face_mostly_out, guide_box)
+        self.assertFalse(center_in)
+        self.assertLess(overlap, OVERLAP_THRESHOLD)
+
+        # 2. Crossing boundary with substantial overlap (>= 50%, center inside)
+        face_mostly_in = (160, 140, 100, 120)
+        overlap_in, center_in_2 = face_guide_overlap(face_mostly_in, guide_box)
+        self.assertTrue(center_in_2)
+        self.assertGreaterEqual(overlap_in, OVERLAP_THRESHOLD)
+
+        # 3. If single face is mostly out, faces() rejects with center_face_in_guide
+        mock_det = Mock()
+        mock_det.detect.return_value = (None, np.array([self._make_raw_face(55, 70, 50, 60)]))
+        with patch.object(self.vision, "detector", mock_det):
+            with self.assertRaises(CaptureError) as ctx:
+                self.vision.faces(self.img_4x3)
+            self.assertEqual(str(ctx.exception), "center_face_in_guide")
+
+        # 4. If main person is inside and another is crossing (< 50%), main person is selected
+        inside_face = self._make_raw_face(120, 70, 80, 90)
+        crossing_face = self._make_raw_face(55, 70, 50, 60)
+        mock_det.detect.return_value = (None, np.array([crossing_face, inside_face]))
+        with patch.object(self.vision, "detector", mock_det):
+            face, quality = self.vision.faces(self.img_4x3)
+            self.assertEqual(quality["box"], [240.0, 140.0, 160.0, 180.0])
+
+    def test_different_aspect_ratios_and_mirrored_preview(self):
+        # 16:9 widescreen frame (640x360)
+        img_16_9 = np.random.randint(80, 160, (360, 640, 3), dtype=np.uint8)
+        mock_det = Mock()
+        mock_det.detect.return_value = (None, np.array([self._make_raw_face(120, 70, 80, 90)]))
+        with patch.object(self.vision, "detector", mock_det):
+            face, quality = self.vision.faces(img_16_9)
+            self.assertEqual(quality["box"], [240.0, 105.0, 160.0, 135.0])
+
+        # 9:16 portrait mobile frame (270x480)
+        img_portrait = np.random.randint(80, 160, (480, 270, 3), dtype=np.uint8)
+        mock_det.detect.return_value = (None, np.array([self._make_raw_face(105, 70, 110, 90)]))
+        with patch.object(self.vision, "detector", mock_det):
+            face, quality = self.vision.faces(img_portrait)
+            self.assertAlmostEqual(quality["box"][0], 88.59, delta=0.5)
+            self.assertAlmostEqual(quality["box"][2], 92.81, delta=0.5)
+
+        # Mirrored preview invariance
+        left = DEFAULT_GUIDE["left"]
+        width = DEFAULT_GUIDE["width"]
+        mirrored_left = round(1.0 - (left + width), 6)
+        self.assertEqual(left, mirrored_left, "Guide must be horizontally symmetric for mirror invariance")
+
+    def test_consistent_enrollment_and_verification_selection(self):
+        import base64
+        import io
+        from PIL import Image
+
+        def make_frame_from_img(img):
+            buf = io.BytesIO()
+            Image.fromarray(img).save(buf, format="JPEG")
+            return base64.b64encode(buf.getvalue()).decode()
+
+        frame = make_frame_from_img(self.img_4x3)
+
+        # 1. Successful enrollment when same person is in guide across 3 frames
+        inside_face = self._make_raw_face(120, 70, 80, 90)
+        mock_det = Mock()
+        mock_det.detect.return_value = (None, np.array([inside_face]))
+
+        with patch.object(self.vision, "detector", mock_det):
+            template = self.vision.enroll([frame, frame, frame])
+            self.assertEqual(len(template), 512)
+
+        # 2. Rejection if face switches/teleports across frames in burst
+        face_f0 = self._make_raw_face(90, 70, 60, 70)
+        face_f1 = self._make_raw_face(210, 70, 60, 70)
+        mock_det.detect.side_effect = [(None, np.array([face_f0])), (None, np.array([face_f1])), (None, np.array([face_f1]))]
+        with patch.object(self.vision, "detector", mock_det):
+            with self.assertRaises(CaptureError) as ctx:
+                self.vision.enroll([frame, frame, frame])
+            self.assertEqual(str(ctx.exception), "center_face_in_guide")
+
+        # 3. Verification consistency: person switching in burst returns UNCERTAIN
+        with patch.object(self.vision, "detector", mock_det):
+            mock_det.detect.side_effect = [(None, np.array([face_f0])), (None, np.array([face_f1])), (None, np.array([face_f1]))]
+            ev = self.vision.verify([frame, frame, frame], template)
+            self.assertEqual(ev.pad, "UNCERTAIN")
 
 
 if __name__ == "__main__":

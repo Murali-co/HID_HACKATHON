@@ -44,7 +44,7 @@ const messages = {
   liveness_uncertain: "Center your face and hold still in even light.",
   identity_uncertain: "Face the camera directly and try again.",
   center_face_in_guide: "Move closer and center your face inside the guide.",
-  one_face_required: "Make sure exactly one face is visible. Avoid background people or posters.",
+  one_face_required: "Make sure only one person is inside the face guide.",
   improve_light_or_focus: "Improve the lighting and hold still.",
   enrollment_face_changed: "Keep still during enrollment — face changed between frames.",
   enrollment_presentation_attack: "Enrollment rejected: presentation attack detected.",
@@ -548,9 +548,19 @@ get("export").addEventListener("click", () => {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 });
 
+function applyGuideGeometry(guide) {
+  const guideEl = document.querySelector(".guide");
+  if (!guideEl || !guide) return;
+  if (typeof guide.left === "number") guideEl.style.left = `${guide.left * 100}%`;
+  if (typeof guide.top === "number") guideEl.style.top = `${guide.top * 100}%`;
+  if (typeof guide.width === "number") guideEl.style.width = `${guide.width * 100}%`;
+  if (typeof guide.height === "number") guideEl.style.height = `${guide.height * 100}%`;
+}
+
 fetch("/api/status").then(response => response.json()).then(data => {
   ready = data.models_ready;
   if (!ready) show("REQUEST_VERIFICATION", messages.models_unavailable);
+  if (data.guide) applyGuideGeometry(data.guide);
   controls();
 }).catch(() => show("REQUEST_VERIFICATION", messages.pipeline_unavailable));
 
